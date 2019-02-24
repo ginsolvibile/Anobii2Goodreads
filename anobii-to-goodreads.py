@@ -1,11 +1,18 @@
-# Customise these variables to define input and output
-anobii_file = "export.csv"
-goodreads_file = "import_to_goodreads.csv" 
+from __future__ import print_function
+import sys
+import re
+import csv, codecs, cStringIO
+
+
+####### Customise here if needed
+
+FINISHED = "Finito nel "
+DROPPED = "Abbandonato nel "
+READING = "In lettura dal "
+ITA_MONTHS = ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"]
+
 
 ####### do not change anything below this line
-
-from datetime import date
-import csv, codecs, cStringIO
 
 class UTF8Recoder:
 	"""
@@ -74,36 +81,97 @@ class UnicodeWriter:
 			self.writerow(row)
 
 
-reader = UnicodeReader(open(anobii_file,"rb"))
-reader.next() # first line is column titles
-target = []
-target.append(["Title","Author","Additional Authors","ISBN","ISBN13","My Rating","Average Rating","Publisher","Binding","Year Published","Original Publication Year","Date Read","Date Added","Bookshelves","My Review","Spoiler","Private Notes","Recommended For","Recommended By"])
-# loading all in memory is not efficient, there's certainly a better way
-for l in reader:
-	isbn = l[0].replace("'","")
-	title = l[1] + ":" + l[2]
-	author = l[3]
-	format = l[4]
-	pages = l[5]
-	publisher = l[6]
-	# expensive date conversion, but might come handy in future
-	pubdate = ""
-	#pd_tmp = l[7].replace("'","").split("-")
-	#if pd_tmp[0]:
-	#	pubdate = date(int(pd_tmp[0]),int(pd_tmp[1]),int(pd_tmp[2])).year 
-	privnote = l[8]
-	comment = l[10]
-	status = l[11]
-	readdate = ""
-	if status[0:9] == "Finished:":
-		readdate = status[10:] # can't be bothered to reformat here
-	rating = l[12]
-	tags = l[13].replace(" ","-").replace("-/-"," ")
+
+if __name__ == '__main__':
+        if len(sys.argv) == 3:
+                try:
+                        in_file = open(sys.argv[1], "rb")
+                        out_file = open(sys.argv[2], "wb")
+                except IOError as ioe:
+                        print("I/O error:", ioe, file=sys.stderr)
+                        sys.exit()
+        elif len(sys.argv) == 1:
+                in_file = sys.stdin
+                out_file = sys.stdout
+                print("Using stdin / stdout", file=sys.stderr)
+        else:
+                print("Usage: %s [<input file> <output file>]\nIf no arguments are provided, the script uses stdin and stdout." % sys.argv[0], file=sys.stderr)
+                sys.exit()
+        stats = dict(read=0, gaveup=0, reading=0, toread=0)
+        reader = UnicodeReader(in_file)
+	reader.next() # first line is column titles
+	target = []
+	target.append(["Title","Author","Additional Authors","ISBN","ISBN13","My Rating","Average Rating","Publisher","Binding","Year Published",
+                       "Original Publication Year","Date Read","Date Added","Bookshelves","My Review","Spoiler","Private Notes","Recommended For","Recommended By"])
+
+	isbn_re = re.compile("\[([\w\d]+)\]")
+        date_re = re.compile("\[([\dx]{4})-([\dx]{2})-([\dx]{2})\]")
+        human_date_re = re.compile("([\d]{2})/(\w{3})/([\d]{4}) 00:00:00")
+	for l in reader:
+	        m = isbn_re.match(l[0])
+	        if m is None or len(m.groups()) != 1:
+	                print("Invalid ISBN in line ", l, file=sys.stderr)
+	                continue
+	        isbn = m.groups()[0]
+		title = l[1]
+	        if l[2] != "":
+	                title += ": " + l[2]
+		author = l[3]
+		edition = l[4]
+		pages = l[5]
+		publisher = l[6]
+
+		date_publ = ""
+                m = date_re.match(l[7])
+                if m is not None:
+                        (year, month, day) = m.groups()
+                        if day == 'xx':
+                                day = 1
+                        if month == 'xx':
+                                month = 1
+                        if year == 'xxxx':
+                                year = 1970
+                        date_publ = "%04d-%02d-%02d" % tuple(map(int, (year, month, day)))
+
+		privnote = l[8]
+		comment = l[10]
+
+		status = l[11]
+                if status.startswith(FINISHED):
+                        date_read = status[len(FINISHED):]
+                        tags = "read"
+                        stats['read'] += 1
+                elif status.startswith(DROPPED):
+                        date_read = status[len(DROPPED):]
+                        tags = "gave-up-on"
+                        stats['gaveup'] += 1
+                elif status.startswith(READING):
+                        date_read = status[len(READING):]
+                        tags = "currently-reading"
+                        stats['reading'] += 1
+                else:
+                        date_read = ""
+                        tags = "to-read"
+                        stats['toread'] += 1
+                if date_read != "" :
+                        m = human_date_re.match(date_read)
+                        if m is None or m.groups()[1] not in ITA_MONTHS:
+                                print("Invalid date format:", date_read, file=sys.stderr)
+                                date_read = ""
+                        else:
+                                (day, month, year) = m.groups()
+                                month = ITA_MONTHS.index(month) + 1
+                                date_read = "%04d-%02d-%02d" % (int(year), month, int(day))
+
+                date_added = ""  # no date added information in Anobii's export file
+
+		rating = l[12]
+		
+		tline = [title, author, "", isbn, "", rating, "", publisher, edition, "", date_publ, date_read, date_added, tags, comment, "", privnote, "", ""]
+		target.append(tline)
 	
-	tline = [title,author,"",isbn,"",rating,"",publisher,format,"",pubdate,readdate,"",tags, comment,"",privnote,"",""]
-	target.append(tline)
+	writer = UnicodeWriter(out_file, dialect='excel', quoting=csv.QUOTE_NONNUMERIC)
+	writer.writerows(target)
+	
+	print("Done! Stats:", stats, file=sys.stderr)
 
-writer = UnicodeWriter(open(goodreads_file,"wb"),dialect='excel',quoting=csv.QUOTE_NONNUMERIC)
-writer.writerows(target)
-
-print "Done! saved output to " + goodreads_file
